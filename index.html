@@ -1,0 +1,193 @@
+<html>
+<head>
+  <script type="importmap">
+  {
+    "imports": {
+      "ol": "https://esm.sh/ol@9.2.4",
+      "ol/": "https://esm.sh/ol@9.2.4/",
+      "proj4": "https://esm.sh/proj4@2.11.0",
+      "unzipit": "https://esm.sh/unzipit@1.4.3"
+    }
+  }
+  </script>
+  <style>
+    @import "https://cdn.jsdelivr.net/npm/ol/ol.css";
+    html, body {
+      margin: 0;
+      height: 100%;
+    }
+    #map {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 100%;
+    }
+  </style>
+</head>
+<body>
+  <div id="map" class="map"></div>
+
+<script type="module">
+import {Map, View} from 'ol';
+import {click} from 'ol/events/condition';
+import {extend, getCenter} from 'ol/extent';
+import GML32 from 'ol/format/GML32';
+import {Select} from 'ol/interaction';
+import {Tile as TileLayer, Vector as VectorLayer, VectorImage as VectorImageLayer} from 'ol/layer';
+import {get as getProjection, transformExtent, fromLonLat} from 'ol/proj';
+import {register} from 'ol/proj/proj4';
+import {OSM, Vector as VectorSource} from 'ol/source';
+
+import proj4 from 'proj4';
+
+import {unzip} from 'unzipit';
+
+(async () => {
+
+// https://openlayers.org/en/latest/examples/reprojection.html
+proj4.defs(
+  'EPSG:27700',
+  '+proj=tmerc +lat_0=49 +lon_0=-2 +k=0.9996012717 ' +
+    '+x_0=400000 +y_0=-100000 +ellps=airy ' +
+    '+towgs84=446.448,-125.157,542.06,0.15,0.247,0.842,-20.489 ' +
+    '+units=m +no_defs',
+);
+// +proj=tmerc +lat_0=49 +lon_0=-2 +k=0.9996012717 +x_0=400000 +y_0=-100000 +ellps=airy +nadgrids=OSTN15_NTv2_OSGBtoETRS.gsb +units=m +no_defs +type=crs
+register(proj4);
+
+const proj27700 = getProjection('EPSG:27700');
+proj27700.setExtent([-650000, -150000, 1350000, 1450000]);
+
+const proj3857 = getProjection('EPSG:3857');
+
+const regionInfo = fetch('https://dl.dropboxusercontent.com/scl/fi/0uicrhfr603nenii259t5/info.json?rlkey=x4tnjdijky0hk5iwclahgfhya&st=2a31hpjm&dl=0').then(r => r.json());
+
+const addBoundaries = async(url) => {
+  const boundariesUrl = 'https://dl.dropboxusercontent.com/scl/fi/a348fd1sqprofwmlmw3qn/local-authorities.zip?rlkey=jay2ww02sp3hp423p5zj15im0&st=07vevpw8&dl=0';
+  const {entries} = await unzip(boundariesUrl);
+
+  const gmlFile = Object.keys(entries).find(n => n.endsWith('.gml'));
+  const gml = await entries[gmlFile].text();
+  // featureNS doesn't seem to work
+  let gmlFixed = gml.replaceAll('ogr:featureMember', 'gml:featureMember');
+
+  console.time('Load GML');
+  const features = new GML32().readFeatures(gmlFixed, {dataProjection: 'EPSG:27700', featureProjection: 'EPSG:3857'});
+  console.timeEnd('Load GML');
+  console.log(`Found ${features.length} features from ${gmlFixed.length} bytes of data`);
+
+  const vectorSource = new VectorSource({features});
+  const vectorStyle = {
+    'fill-color': 'rgba(128, 128, 255, 0.4)',
+    'stroke-width': 1,
+    'stroke-color': 'rgba(32, 32, 64, 0.5)',
+  };
+  // TODO: add text to the polygons?
+
+  const renderedLayer = new VectorImageLayer({
+    source: vectorSource,
+    style: vectorStyle,
+    maxZoom: 16,
+  });
+  const vectorLayer = new VectorLayer({
+    source: vectorSource,
+    style: vectorStyle,
+    minZoom: 16,
+  });
+
+  for (const {filename, extent, url} of await regionInfo) {
+    const mapExtent = transformExtent(extent, 'EPSG:27700', 'EPSG:3857');
+    const feats = vectorSource.getFeaturesAtCoordinate(getCenter(mapExtent));
+    if (feats.length != 1) {
+      console.log(`Cannot identify feature, skipping`);
+      continue;
+    }
+    const feat = feats[0];
+    console.log(`Setting ${feat.get('text')} to ${url}`);
+    feat.set('url', url);
+  }
+
+  map.addLayer(renderedLayer);
+  map.addLayer(vectorLayer);
+
+  const select = new Select();
+  select.on('select', e => {
+    for (const feat of e.selected) {
+      console.log(`Showing ${feat.get('text')} (${feat.get('nationalCode')})`);
+      addRegion(feat);
+    }
+    for (const feat of e.deselected) {
+      console.log(`Hiding ${feat.get('text')} (${feat.get('nationalCode')})`);
+      map.removeLayer(feat.get('renderedLayer'));
+      map.removeLayer(feat.get('vectorLayer'));
+    }
+  });
+  map.addInteraction(select);
+
+};
+
+const addRegion = async (feat) => {
+  // TODO: do this in a worker
+  // Can't use HTTPRangeReader because Dropbox doesn't reliably return length
+  const {entries} = await unzip(feat.get('url'));
+
+  const gmlFile = Object.keys(entries).find(n => n.endsWith('.gml'));
+  const gml = await entries[gmlFile].text();
+  let gmlFixed = gml.replaceAll('wfs:member', 'gml:featureMember');
+
+  console.time('Load GML');
+  const features = new GML32().readFeatures(gmlFixed, {dataProjection: 'EPSG:27700', featureProjection: 'EPSG:3857'});
+  console.timeEnd('Load GML');
+  console.log(`Found ${features.length} features from ${gmlFixed.length} bytes of data`);
+  /*
+  const gmlExtent = features[0].getGeometry().getExtent();
+  features.forEach( feature => extend(gmlExtent, feature.getGeometry().getExtent()) );
+  console.log(`Got bounding box for features`);
+  */
+
+  const vectorSource = new VectorSource({features});
+  const vectorStyle = {
+    'fill-color': 'rgba(255, 255, 255, 0.6)',
+    'stroke-width': 1,
+    'stroke-color': 'rgba(0, 0, 0, 0.5)',
+  };
+  // TODO: add text to the polygons?
+
+  const renderedLayer = new VectorImageLayer({
+    source: vectorSource,
+    style: vectorStyle,
+    maxZoom: 16,
+  });
+  const vectorLayer = new VectorLayer({
+    source: vectorSource,
+    style: vectorStyle,
+    minZoom: 16,
+  });
+
+  map.addLayer(renderedLayer);
+  map.addLayer(vectorLayer);
+  feat.set('renderedLayer', renderedLayer);
+  feat.set('vectorLayer', vectorLayer);
+
+  // TODO: show inspire ID on click
+
+};
+
+const map = new Map({
+  target: 'map',
+  layers: [
+    new TileLayer({
+      source: new OSM(),
+    }),
+  ],
+  view: new View({
+    center: fromLonLat([-1, 52]),
+    zoom: 6,
+  })
+});
+window.map = map;
+addBoundaries();
+
+})();
+</script>
+</body>

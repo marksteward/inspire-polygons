@@ -1,0 +1,108 @@
+name: Scrape INSPIRE polygons
+on:
+  schedule:
+    - cron: '0 0 8 * *'  # once a month, after the first Sunday
+  workflow_dispatch:
+
+jobs:
+  scrape-and-upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install prerequisites
+        run: |
+          sudo apt-get update && sudo apt-get -y install gdal-bin
+
+      - name: Scrape
+        run: |
+          mkdir -p scrape && cd scrape
+          # wget really struggles with this page
+          curl -Ls -c /dev/null -o download.html https://use-land-property-data.service.gov.uk/datasets/inspire/download
+          grep -o 'href="/datasets/inspire/download/.*\.zip"' download.html | cut -d'"' -f2 >zips.txt
+          cat zips.txt | while read -r x; do
+            echo "Downloading $x"
+            curl -LsO -c /dev/null --retry 3 "https://use-land-property-data.service.gov.uk$x"
+          done
+
+      - name: Get access token
+        id: get_token
+        run: |
+          token=$(
+            curl -s https://api.dropbox.com/oauth2/token \
+              -d refresh_token=${{ secrets.DROPBOX_REFRESH_TOKEN }} \
+              -d grant_type=refresh_token \
+              -d client_id=${{ secrets.DROPBOX_APP_KEY }} \
+              -d client_secret=${{ secrets.DROPBOX_APP_SECRET }} \
+            | jq -Rr 'fromjson | .access_token'
+          )
+          echo "::add-mask::$token"
+          echo "token=$token" >> "$GITHUB_OUTPUT"
+
+      - name: Upload files
+        run: |
+          echo "Deleting newscrape"
+          curl -s --fail-with-body https://api.dropboxapi.com/2/files/delete_v2 \
+            -H "Authorization: Bearer ${{ steps.get_token.outputs.token }}" \
+            -H 'Content-Type: application/json' \
+            --data "{\"path\":\"/newscrape\"}" \
+          || true; echo
+
+          echo "Creating newscrape"
+          curl -s --fail-with-body https://api.dropboxapi.com/2/files/create_folder_v2 \
+            -H "Authorization: Bearer ${{ steps.get_token.outputs.token }}" \
+            -H 'Content-Type: application/json' \
+            --data "{\"path\":\"/newscrape\"}"; echo
+
+          for f in scrape/*.zip; do
+            # FIXME: ensure $f doesn't contain quotes
+            echo "Uploading new$f"
+            curl -s --fail-with-body https://content.dropboxapi.com/2/files/upload \
+              -H "Authorization: Bearer ${{ steps.get_token.outputs.token }}" \
+              -H "Dropbox-API-Arg: {\"path\":\"/new$f\"}" \
+              -H 'Content-Type: application/octet-stream' \
+              --data-binary "@$f"; echo
+
+            echo "Sharing $f"
+            curl -s --fail-with-body https://api.dropboxapi.com/2/sharing/create_shared_link_with_settings \
+              -H "Authorization: Bearer ${{ steps.get_token.outputs.token }}" \
+              -H 'Content-Type: application/json' \
+              -d "{\"path\":\"/new$f\",\"settings\":{\"access\":\"viewer\",\"allow_download\":true,\"audience\":\"public\",\"requested_visibility\":\"public\"}}" \
+            | tee resp.txt; echo
+            url=$(cat resp.txt | jq -Rr 'fromjson | .url')
+
+            extent=$(ogrinfo -so /vsizip/$f/Land_Registry_Cadastral_Parcels.gml -oo XSD=/dev/null PREDEFINED \
+              | grep '^Extent:' \
+              | sed 's/.*(\([0-9.]\+\), \([0-9.]\+\)) - (\([0-9.]\+\), \([0-9.]\+\))/[\1, \2, \3, \4]/')
+
+            echo "{ \
+              \"filename\": \"${f#scrape/}\", \
+              \"extent\": $extent, \
+              \"url\": \"${url/www.dropbox.com/dl.dropboxusercontent.com/}\" \
+            }" >> info.jsona
+
+          done
+
+          echo "Converting to JSON"
+          jq -sc < info.jsona > info.json
+
+          echo "Deleting old scrapes"
+          curl -s --fail-with-body https://api.dropboxapi.com/2/files/delete_v2 \
+            -H "Authorization: Bearer ${{ steps.get_token.outputs.token }}" \
+            -H 'Content-Type: application/json' \
+            --data "{\"path\":\"/scrape\"}" \
+          || true; echo
+
+          echo "Renaming newscrape to scrape"
+          curl -s --fail-with-body https://api.dropboxapi.com/2/files/move_v2 \
+            -H "Authorization: Bearer ${{ steps.get_token.outputs.token }}" \
+            -H 'Content-Type: application/json' \
+            --data "{\"from_path\":\"/newscrape\", \"to_path\":\"/scrape\"}"; echo
+
+          for f in info.json scrape/download.html scrape/zips.txt; do
+            echo "Uploading $f"
+            curl -s --fail-with-body https://content.dropboxapi.com/2/files/upload \
+              -H "Authorization: Bearer ${{ steps.get_token.outputs.token }}" \
+              -H "Dropbox-API-Arg: {\"path\":\"/$f\", \"mode\": \"overwrite\"}" \
+              -H 'Content-Type: application/octet-stream' \
+              --data-binary "@$f"; echo
+          done
+
