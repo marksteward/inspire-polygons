@@ -62,6 +62,8 @@ const proj3857 = getProjection('EPSG:3857');
 
 const regionInfo = fetch('https://dl.dropboxusercontent.com/scl/fi/0uicrhfr603nenii259t5/info.json?rlkey=x4tnjdijky0hk5iwclahgfhya&st=2a31hpjm&dl=0').then(r => r.json());
 
+const shownRegions = new Set();
+
 const addBoundaries = async(url) => {
   const boundariesUrl = 'https://dl.dropboxusercontent.com/scl/fi/a348fd1sqprofwmlmw3qn/local-authorities.zip?rlkey=jay2ww02sp3hp423p5zj15im0&st=07vevpw8&dl=0';
   const {entries} = await unzip(boundariesUrl);
@@ -110,23 +112,60 @@ const addBoundaries = async(url) => {
   map.addLayer(renderedLayer);
   map.addLayer(vectorLayer);
 
-  const select = new Select();
-  select.on('select', e => {
-    for (const feat of e.selected) {
-      console.log(`Showing ${feat.get('text')} (${feat.get('nationalCode')})`);
-      addRegion(feat);
-    }
-    for (const feat of e.deselected) {
-      console.log(`Hiding ${feat.get('text')} (${feat.get('nationalCode')})`);
-      map.removeLayer(feat.get('renderedLayer'));
-      map.removeLayer(feat.get('vectorLayer'));
-    }
+  map.on('click', e => {
+    map.forEachFeatureAtPixel(e.pixel, (feat, layer) => {
+      const isRegionLayer = (layer == renderedLayer || layer == vectorLayer);
+      const isShownRegion = shownRegions.has(feat);
+
+      if (isRegionLayer) {
+        /* For region layers, a single click means load that region on its own.
+         * Hold down shift to show multiple regions or hide a shown region. */
+
+        if (!e.originalEvent.shiftKey) {
+          if (isShownRegion) return;
+
+          for (const feat of shownRegions) {
+            hideRegion(feat);
+          }
+          console.log(`Showing ${feat.get('text')} (${feat.get('nationalCode')})`);
+          showRegion(feat);
+        } else {
+          if (isShownRegion) {
+            hideRegion(feat);
+          } else {
+            showRegion(feat);
+          }
+        }
+
+      } else {
+        /* Show the InspireID, as long as we're not toggling a region */
+        // TODO: do we need to deal with overlapping polygons?
+        if (e.originalEvent.shiftKey) return;
+        setTimeout(() => alert(`Inspire ID ${feat.get('INSPIREID')}`), 0);
+        return true;
+      }
+
+    });
   });
-  map.addInteraction(select);
 
 };
 
-const addRegion = async (feat) => {
+const hideRegion = async (feat) => {
+  map.removeLayer(feat.get('renderedLayer'));
+  map.removeLayer(feat.get('vectorLayer'));
+
+  shownRegions.delete(feat);
+};
+
+const showRegion = async (feat) => {
+  if (feat.get('renderedLayer')) {
+    map.addLayer(feat.get('renderedLayer'));
+    map.addLayer(feat.get('vectorLayer'));
+
+    shownRegions.add(feat);
+    return;
+  }
+
   // TODO: do this in a worker
   // Can't use HTTPRangeReader because Dropbox doesn't reliably return length
   const {entries} = await unzip(feat.get('url'));
@@ -169,8 +208,7 @@ const addRegion = async (feat) => {
   feat.set('renderedLayer', renderedLayer);
   feat.set('vectorLayer', vectorLayer);
 
-  // TODO: show inspire ID on click
-
+  shownRegions.add(feat);
 };
 
 const map = new Map({
