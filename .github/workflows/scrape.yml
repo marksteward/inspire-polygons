@@ -77,7 +77,7 @@ jobs:
               \"filename\": \"${f#scrape/}\", \
               \"extent\": $extent, \
               \"url\": \"${url/www.dropbox.com/dl.dropboxusercontent.com/}\" \
-            }" >> info.jsona
+            }" | tee -a info.jsona
 
           done
 
