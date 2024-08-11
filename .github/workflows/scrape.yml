@@ -73,11 +73,15 @@ jobs:
               | grep '^Extent:' \
               | sed 's/.*(\([0-9.]\+\), \([0-9.]\+\)) - (\([0-9.]\+\), \([0-9.]\+\))/[\1, \2, \3, \4]/')
 
-            echo "{ \
-              \"filename\": \"${f#scrape/}\", \
-              \"extent\": $extent, \
-              \"url\": \"${url/www.dropbox.com/dl.dropboxusercontent.com/}\" \
-            }" | tee -a info.jsona
+            if [[ -z "$extent" ]]; then
+              echo "Cannot determine extent for $f" >&2
+            else
+              echo "{ \
+                \"filename\": \"${f#scrape/}\", \
+                \"extent\": $extent, \
+                \"url\": \"${url/www.dropbox.com/dl.dropboxusercontent.com/}\" \
+              }" | tee -a info.jsona
+            fi
 
           done
 
